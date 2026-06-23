@@ -36,6 +36,7 @@ modbus/
   constants.gengo   Function codes and exception codes
   frame.gengo       MBAP frame build + parse; exports Response struct
   client.gengo      Request helpers; exports Client struct and Connection interface
+  codec.gengo       IEEE 754 float / integer register codec; exports Codec struct
 demo.gengo          Demo script
 ```
 
@@ -77,10 +78,53 @@ mb.read_discrete_inputs(conn Connection, c Client, address int, count int)   []b
 mb.write_single_register(conn Connection, c Client, address int, value int)  bool
 mb.write_single_coil(conn Connection, c Client, address int, on bool)        bool
 mb.write_multiple_registers(conn Connection, c Client, address int, values []int) bool
+mb.write_multiple_coils(conn Connection, c Client, address int, values []bool)   bool
 ```
 
 All functions return an error value (checkable with `std.core.is_error`) on
 exception response or connection failure.
+
+### `Codec` struct — float and integer register decoding / encoding
+
+```gengo
+cdc := import("./modbus/codec")
+
+// Create a codec for a specific device's byte order.
+decoder := cdc.Codec { byte_order: cdc.CDAB }  // most common Modbus convention
+
+// Decode a 32-bit float from two consecutive registers.
+regs  := mb.read_holding_registers(conn, client, 100, 2)
+value := decoder.f32(regs, 0)
+
+// Encode a float back to register values for writing.
+out   := decoder.f32_regs(value)
+mb.write_multiple_registers(conn, client, 100, out)
+```
+
+**Byte orders** (ABCD naming convention, A = most significant byte):
+
+| Constant | Description | Used by |
+|----------|-------------|---------|
+| `ABCD`   | Big-endian (IEEE 754 native) | Siemens S7, Allen-Bradley BE mode |
+| `CDAB`   | Word-swapped (most common) | Schneider/Modicon, Emerson, Yaskawa |
+| `BADC`   | Byte-swapped within each word | Some Danfoss devices |
+| `DCBA`   | Fully little-endian | Some x86-based devices |
+
+**Methods on `Codec`**:
+
+```gengo
+// 32-bit float (2 registers)
+cdc.f32(regs []int, i int) float       // decode at register index i
+cdc.f32_regs(v float) []int            // encode → 2 register values
+
+// 64-bit double (4 registers)
+cdc.f64(regs []int, i int) float       // decode at register index i
+cdc.f64_regs(v float) []int            // encode → 4 register values
+
+// 32-bit unsigned integer (2 registers)
+cdc.u32(regs []int, i int) int         // decode at register index i
+cdc.u32_regs(v int) []int              // encode → 2 register values
+```
 
 ## Design notes
 

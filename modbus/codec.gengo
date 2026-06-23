@@ -1,0 +1,119 @@
+// Modbus register codec — float and integer encoding / decoding.
+//
+// Modbus registers are 16-bit. Multi-register values (32-bit floats, 64-bit
+// doubles, 32-bit integers) span 2 or 4 consecutive registers.  Different
+// device vendors use different byte orderings.  This module defines the four
+// standard orderings using the ABCD naming convention (bytes A=MSB … D=LSB
+// for 32-bit; A=MSB … H=LSB for 64-bit):
+//
+//   ABCD — big-endian.  Register[i] holds bytes AB, register[i+1] holds CD.
+//          Used by Siemens S7, Allen-Bradley in big-endian mode.
+//
+//   CDAB — word-swapped (also called "Modicon byte order").
+//          Register[i] holds CD, register[i+1] holds AB.
+//          Most common Modbus convention (Schneider, Emerson, Yaskawa, …).
+//
+//   BADC — byte-swapped within each word.
+//          Register[i] holds BA, register[i+1] holds DC.
+//
+//   DCBA — fully little-endian.
+//          Register[i] holds DC, register[i+1] holds BA.
+//          Used by some x86-based devices.
+//
+// For 64-bit values the same word ordering applies across all four registers:
+//   ABCD → [AB, CD, EF, GH]   CDAB → [GH, EF, CD, AB]
+//   BADC → [BA, DC, FE, HG]   DCBA → [HG, FE, DC, BA]
+//
+// Usage:
+//   cdc := Codec { byte_order: CDAB }   // Schneider / Modicon default
+//
+//   regs := mb.read_holding_registers(conn, client, 100, 2)
+//   val  := cdc.f32(regs, 0)            // decode float at register index 0
+//
+//   out  := cdc.f32_regs(3.14)          // encode float → 2 register values
+//   mb.write_multiple_registers(conn, client, 100, out)
+
+std := import("std")
+b   := std.bytes
+
+pub const ABCD := "ABCD"
+pub const CDAB := "CDAB"
+pub const BADC := "BADC"
+pub const DCBA := "DCBA"
+
+// Codec holds the byte-order convention for a specific device.
+pub type Codec struct {
+    byte_order string,
+}
+
+// ── 32-bit IEEE 754 float (2 registers) ─────────────────────────────────────
+
+// f32 decodes a 32-bit IEEE 754 float from two consecutive registers at index i.
+func (c Codec) f32(regs []int, i int) float {
+    raw := b.u16be(regs[i]) + b.u16be(regs[i + 1])
+    if c.byte_order == CDAB { raw = b.u16be(regs[i + 1]) + b.u16be(regs[i]) }
+    if c.byte_order == BADC { raw = b.u16le(regs[i]) + b.u16le(regs[i + 1]) }
+    if c.byte_order == DCBA { raw = b.u16le(regs[i + 1]) + b.u16le(regs[i]) }
+    return b.f32be_at(raw, 0)
+}
+
+// f32_regs encodes a 32-bit IEEE 754 float to two register values.
+func (c Codec) f32_regs(v float) []int {
+    raw := b.f32be(v)
+    if c.byte_order == ABCD { return [b.u16be_at(raw, 0), b.u16be_at(raw, 2)] }
+    if c.byte_order == CDAB { return [b.u16be_at(raw, 2), b.u16be_at(raw, 0)] }
+    if c.byte_order == BADC { return [b.u16le_at(raw, 0), b.u16le_at(raw, 2)] }
+    return [b.u16le_at(raw, 2), b.u16le_at(raw, 0)]
+}
+
+// ── 64-bit IEEE 754 double (4 registers) ────────────────────────────────────
+
+// f64 decodes a 64-bit IEEE 754 double from four consecutive registers at index i.
+func (c Codec) f64(regs []int, i int) float {
+    raw := b.u16be(regs[i]) + b.u16be(regs[i+1]) + b.u16be(regs[i+2]) + b.u16be(regs[i+3])
+    if c.byte_order == CDAB {
+        raw = b.u16be(regs[i+3]) + b.u16be(regs[i+2]) + b.u16be(regs[i+1]) + b.u16be(regs[i])
+    }
+    if c.byte_order == BADC {
+        raw = b.u16le(regs[i]) + b.u16le(regs[i+1]) + b.u16le(regs[i+2]) + b.u16le(regs[i+3])
+    }
+    if c.byte_order == DCBA {
+        raw = b.u16le(regs[i+3]) + b.u16le(regs[i+2]) + b.u16le(regs[i+1]) + b.u16le(regs[i])
+    }
+    return b.f64be_at(raw, 0)
+}
+
+// f64_regs encodes a 64-bit IEEE 754 double to four register values.
+func (c Codec) f64_regs(v float) []int {
+    raw := b.f64be(v)
+    if c.byte_order == ABCD {
+        return [b.u16be_at(raw, 0), b.u16be_at(raw, 2), b.u16be_at(raw, 4), b.u16be_at(raw, 6)]
+    }
+    if c.byte_order == CDAB {
+        return [b.u16be_at(raw, 6), b.u16be_at(raw, 4), b.u16be_at(raw, 2), b.u16be_at(raw, 0)]
+    }
+    if c.byte_order == BADC {
+        return [b.u16le_at(raw, 0), b.u16le_at(raw, 2), b.u16le_at(raw, 4), b.u16le_at(raw, 6)]
+    }
+    return [b.u16le_at(raw, 6), b.u16le_at(raw, 4), b.u16le_at(raw, 2), b.u16le_at(raw, 0)]
+}
+
+// ── 32-bit unsigned integer (2 registers) ───────────────────────────────────
+
+// u32 decodes a 32-bit unsigned integer from two consecutive registers at index i.
+func (c Codec) u32(regs []int, i int) int {
+    raw := b.u16be(regs[i]) + b.u16be(regs[i + 1])
+    if c.byte_order == CDAB { raw = b.u16be(regs[i + 1]) + b.u16be(regs[i]) }
+    if c.byte_order == BADC { raw = b.u16le(regs[i]) + b.u16le(regs[i + 1]) }
+    if c.byte_order == DCBA { raw = b.u16le(regs[i + 1]) + b.u16le(regs[i]) }
+    return b.u32be_at(raw, 0)
+}
+
+// u32_regs encodes a 32-bit unsigned integer to two register values.
+func (c Codec) u32_regs(v int) []int {
+    raw := b.u32be(v)
+    if c.byte_order == ABCD { return [b.u16be_at(raw, 0), b.u16be_at(raw, 2)] }
+    if c.byte_order == CDAB { return [b.u16be_at(raw, 2), b.u16be_at(raw, 0)] }
+    if c.byte_order == BADC { return [b.u16le_at(raw, 0), b.u16le_at(raw, 2)] }
+    return [b.u16le_at(raw, 2), b.u16le_at(raw, 0)]
+}
