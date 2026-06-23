@@ -41,9 +41,9 @@ func run() {
 
     std.io.println("")
     std.io.println("read holding registers 0..4")
-    regs := mb.read_holding_registers(conn, client, 0, 5)
-    if std.core.is_error(regs) {
-        print_error("read_holding_registers", string(regs))
+    regs, err := mb.read_holding_registers(conn, client, 0, 5)
+    if err != null {
+        print_error("read_holding_registers", string(err))
     } else {
         i := 0
         for r in regs {
@@ -56,9 +56,9 @@ func run() {
 
     std.io.println("")
     std.io.println("write register 0 = 42")
-    ok := mb.write_single_register(conn, client, 0, 42)
-    if std.core.is_error(ok) {
-        print_error("write_single_register", string(ok))
+    err = mb.write_single_register(conn, client, 0, 42)
+    if err != null {
+        print_error("write_single_register", string(err))
     } else {
         std.io.println("  ok")
     }
@@ -67,9 +67,9 @@ func run() {
 
     std.io.println("")
     std.io.println("read back register 0")
-    regs = mb.read_holding_registers(conn, client, 0, 1)
-    if std.core.is_error(regs) {
-        print_error("read_holding_registers", string(regs))
+    regs, err = mb.read_holding_registers(conn, client, 0, 1)
+    if err != null {
+        print_error("read_holding_registers", string(err))
     } else {
         std.io.println("  reg[0] = " + std.conv.to_string(regs[0]))
     }
@@ -78,18 +78,19 @@ func run() {
 
     std.io.println("")
     std.io.println("write coil 0 = ON")
-    ok = mb.write_single_coil(conn, client, 0, true)
-    if std.core.is_error(ok) {
-        print_error("write_single_coil", string(ok))
+    err = mb.write_single_coil(conn, client, 0, true)
+    if err != null {
+        print_error("write_single_coil", string(err))
     } else {
         std.io.println("  ok")
     }
 
     std.io.println("")
     std.io.println("read coils 0..7")
-    coils := mb.read_coils(conn, client, 0, 8)
-    if std.core.is_error(coils) {
-        print_error("read_coils", string(coils))
+    coils := []
+    coils, err = mb.read_coils(conn, client, 0, 8)
+    if err != null {
+        print_error("read_coils", string(err))
     } else {
         i := 0
         for c in coils {
@@ -104,18 +105,18 @@ func run() {
 
     std.io.println("")
     std.io.println("write registers 10..14 = [100, 200, 300, 400, 500]")
-    ok = mb.write_multiple_registers(conn, client, 10, [100, 200, 300, 400, 500])
-    if std.core.is_error(ok) {
-        print_error("write_multiple_registers", string(ok))
+    err = mb.write_multiple_registers(conn, client, 10, [100, 200, 300, 400, 500])
+    if err != null {
+        print_error("write_multiple_registers", string(err))
     } else {
         std.io.println("  ok")
     }
 
     std.io.println("")
     std.io.println("read back registers 10..14")
-    regs = mb.read_holding_registers(conn, client, 10, 5)
-    if std.core.is_error(regs) {
-        print_error("read_holding_registers", string(regs))
+    regs, err = mb.read_holding_registers(conn, client, 10, 5)
+    if err != null {
+        print_error("read_holding_registers", string(err))
     } else {
         i := 0
         for r in regs {
@@ -133,18 +134,18 @@ func run() {
     w := codec.writer()
     w.f32(3.14159)
     w.f32(2.71828)
-    ok = mb.write_multiple_registers(conn, client, 20, w.regs())
-    if std.core.is_error(ok) {
-        print_error("write_multiple_registers", string(ok))
+    err = mb.write_multiple_registers(conn, client, 20, w.regs())
+    if err != null {
+        print_error("write_multiple_registers", string(err))
     } else {
         std.io.println("  ok")
     }
 
     std.io.println("")
     std.io.println("read back registers 20..23 and decode via reader cursor")
-    regs = mb.read_holding_registers(conn, client, 20, 4)
-    if std.core.is_error(regs) {
-        print_error("read_holding_registers", string(regs))
+    regs, err = mb.read_holding_registers(conn, client, 20, 4)
+    if err != null {
+        print_error("read_holding_registers", string(err))
     } else {
         r := codec.reader(regs)
         std.io.println("  pi    = " + std.conv.to_string(r.f32()))

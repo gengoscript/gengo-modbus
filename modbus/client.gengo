@@ -27,7 +27,6 @@ func (c Client) next_tx() int {
 }
 
 // read_exact reads exactly n bytes from conn, looping until satisfied.
-// Returns an error if the connection is closed or a read fails.
 func read_exact(conn Connection, n int) string {
     sb  := std.string.builder()
     got := 0
@@ -42,81 +41,72 @@ func read_exact(conn Connection, n int) string {
     return sb.str()
 }
 
-// recv reads one complete Modbus TCP response from conn.
-// Returns an error value on I/O failure; use std.core.is_error to check.
-func recv(conn Connection) fr.Response {
-    header := read_exact(conn, 6)
-    if std.core.is_error(header) { return header }
-    payload_len := std.bytes.u16be_at(header, 4)
-    body := read_exact(conn, payload_len)
-    if std.core.is_error(body) { return body }
-    return fr.parse(header + body)
-}
-
-// send transmits a request frame and returns the parsed response.
-// Returns an error value if the write or subsequent read fails.
-func send(conn Connection, c Client, func_code int, pdu []int) fr.Response {
+// send_request transmits a request frame and returns the parsed response.
+// Returns a non-null ?error on I/O failure or Modbus exception response.
+func send_request(conn Connection, c Client, func_code int, pdu []int) (fr.Response, ?error) {
+    zero  := fr.Response { tx_id: 0, unit_id: 0, func_code: 0, data: [], is_exception: false, exception_code: 0 }
     tx    := c.next_tx()
     frame := fr.build(tx, c.unit_id, func_code, pdu)
     n     := conn.write(frame)
-    if std.core.is_error(n) { return n }
-    return recv(conn)
-}
-
-// modbus_error builds a human-readable error for a Modbus exception response.
-func modbus_error(resp fr.Response) string {
-    return std.core.error("Modbus exception: " + k.exception_name(resp.exception_code))
+    if std.core.is_error(n) { return zero, n }
+    header := read_exact(conn, 6)
+    if std.core.is_error(header) { return zero, header }
+    payload_len := std.bytes.u16be_at(header, 4)
+    body := read_exact(conn, payload_len)
+    if std.core.is_error(body) { return zero, body }
+    resp := fr.parse(header + body)
+    if resp.is_exception {
+        return resp, std.core.error("Modbus exception: " + k.exception_name(resp.exception_code))
+    }
+    return resp, null
 }
 
 // read_holding_registers reads count holding registers starting at address.
 // Returns an array of 16-bit register values (0–65535).
-pub func read_holding_registers(conn Connection, c Client, address int, count int) []int {
+pub func read_holding_registers(conn Connection, c Client, address int, count int) ([]int, ?error) {
     pdu := [
         (address >> 8) & 255, address & 255,
         (count   >> 8) & 255, count   & 255,
     ]
-    resp := send(conn, c, k.FC_READ_HOLDING_REGS, pdu)
-    if std.core.is_error(resp) { return resp }
-    if resp.is_exception { return modbus_error(resp) }
-    regs := []
-    i := 1   // skip byte-count at data[0]
-    for i + 2 <= std.core.len(resp.data) {
-        regs = std.core.append(regs, (resp.data[i] & 255) * 256 + (resp.data[i + 1] & 255))
-        i = i + 2
-    }
-    return regs
-}
-
-// read_input_registers reads count read-only input registers starting at address.
-pub func read_input_registers(conn Connection, c Client, address int, count int) []int {
-    pdu := [
-        (address >> 8) & 255, address & 255,
-        (count   >> 8) & 255, count   & 255,
-    ]
-    resp := send(conn, c, k.FC_READ_INPUT_REGS, pdu)
-    if std.core.is_error(resp) { return resp }
-    if resp.is_exception { return modbus_error(resp) }
+    resp, err := send_request(conn, c, k.FC_READ_HOLDING_REGS, pdu)
+    if err != null { return [], err }
     regs := []
     i := 1
     for i + 2 <= std.core.len(resp.data) {
         regs = std.core.append(regs, (resp.data[i] & 255) * 256 + (resp.data[i + 1] & 255))
         i = i + 2
     }
-    return regs
+    return regs, null
 }
 
-// read_coils reads count coil (output bit) states starting at address.
-// Returns an array of booleans (true = coil ON).
-pub func read_coils(conn Connection, c Client, address int, count int) []bool {
+// read_input_registers reads count read-only input registers starting at address.
+pub func read_input_registers(conn Connection, c Client, address int, count int) ([]int, ?error) {
     pdu := [
         (address >> 8) & 255, address & 255,
         (count   >> 8) & 255, count   & 255,
     ]
-    resp := send(conn, c, k.FC_READ_COILS, pdu)
-    if std.core.is_error(resp) { return resp }
-    if resp.is_exception { return modbus_error(resp) }
+    resp, err := send_request(conn, c, k.FC_READ_INPUT_REGS, pdu)
+    if err != null { return [], err }
+    regs := []
+    i := 1
+    for i + 2 <= std.core.len(resp.data) {
+        regs = std.core.append(regs, (resp.data[i] & 255) * 256 + (resp.data[i + 1] & 255))
+        i = i + 2
+    }
+    return regs, null
+}
+
+// read_coils reads count coil (output bit) states starting at address.
+// Returns an array of booleans (true = coil ON).
+pub func read_coils(conn Connection, c Client, address int, count int) ([]bool, ?error) {
+    pdu := [
+        (address >> 8) & 255, address & 255,
+        (count   >> 8) & 255, count   & 255,
+    ]
+    resp, err := send_request(conn, c, k.FC_READ_COILS, pdu)
+    if err != null { return [], err }
     coils := []
-    i     := 1   // skip byte-count
+    i     := 1
     total := 0
     for i < std.core.len(resp.data) and total < count {
         byte_val := resp.data[i]
@@ -128,18 +118,17 @@ pub func read_coils(conn Connection, c Client, address int, count int) []bool {
         }
         i = i + 1
     }
-    return coils
+    return coils, null
 }
 
 // read_discrete_inputs reads count read-only discrete input states.
-pub func read_discrete_inputs(conn Connection, c Client, address int, count int) []bool {
+pub func read_discrete_inputs(conn Connection, c Client, address int, count int) ([]bool, ?error) {
     pdu := [
         (address >> 8) & 255, address & 255,
         (count   >> 8) & 255, count   & 255,
     ]
-    resp := send(conn, c, k.FC_READ_DISCRETE_INPUTS, pdu)
-    if std.core.is_error(resp) { return resp }
-    if resp.is_exception { return modbus_error(resp) }
+    resp, err := send_request(conn, c, k.FC_READ_DISCRETE_INPUTS, pdu)
+    if err != null { return [], err }
     inputs := []
     i      := 1
     total  := 0
@@ -153,37 +142,33 @@ pub func read_discrete_inputs(conn Connection, c Client, address int, count int)
         }
         i = i + 1
     }
-    return inputs
+    return inputs, null
 }
 
 // write_single_register writes a 16-bit value to a single holding register.
-pub func write_single_register(conn Connection, c Client, address int, value int) bool {
+pub func write_single_register(conn Connection, c Client, address int, value int) ?error {
     pdu := [
         (address >> 8) & 255, address & 255,
         (value   >> 8) & 255, value   & 255,
     ]
-    resp := send(conn, c, k.FC_WRITE_SINGLE_REG, pdu)
-    if std.core.is_error(resp) { return resp }
-    if resp.is_exception { return modbus_error(resp) }
-    return true
+    resp, err := send_request(conn, c, k.FC_WRITE_SINGLE_REG, pdu)
+    return err
 }
 
 // write_single_coil sets a coil at address ON (true) or OFF (false).
-pub func write_single_coil(conn Connection, c Client, address int, on bool) bool {
+pub func write_single_coil(conn Connection, c Client, address int, on bool) ?error {
     coil_val := 0
     if on { coil_val = 255 }
     pdu := [
         (address >> 8) & 255, address & 255,
         coil_val, 0,
     ]
-    resp := send(conn, c, k.FC_WRITE_SINGLE_COIL, pdu)
-    if std.core.is_error(resp) { return resp }
-    if resp.is_exception { return modbus_error(resp) }
-    return true
+    resp, err := send_request(conn, c, k.FC_WRITE_SINGLE_COIL, pdu)
+    return err
 }
 
 // write_multiple_registers writes an array of 16-bit values to consecutive registers.
-pub func write_multiple_registers(conn Connection, c Client, address int, values []int) bool {
+pub func write_multiple_registers(conn Connection, c Client, address int, values []int) ?error {
     count      := std.core.len(values)
     byte_count := count * 2
     pdu := [
@@ -195,14 +180,12 @@ pub func write_multiple_registers(conn Connection, c Client, address int, values
         pdu = std.core.append(pdu, (v >> 8) & 255)
         pdu = std.core.append(pdu, v & 255)
     }
-    resp := send(conn, c, k.FC_WRITE_MULTIPLE_REGS, pdu)
-    if std.core.is_error(resp) { return resp }
-    if resp.is_exception { return modbus_error(resp) }
-    return true
+    resp, err := send_request(conn, c, k.FC_WRITE_MULTIPLE_REGS, pdu)
+    return err
 }
 
 // write_multiple_coils writes an array of coil states to consecutive addresses.
-pub func write_multiple_coils(conn Connection, c Client, address int, values []bool) bool {
+pub func write_multiple_coils(conn Connection, c Client, address int, values []bool) ?error {
     count      := std.core.len(values)
     byte_count := (count + 7) / 8
     pdu := [
@@ -224,8 +207,6 @@ pub func write_multiple_coils(conn Connection, c Client, address int, values []b
         pdu = std.core.append(pdu, bval)
         i = i + 1
     }
-    resp := send(conn, c, k.FC_WRITE_MULTIPLE_COILS, pdu)
-    if std.core.is_error(resp) { return resp }
-    if resp.is_exception { return modbus_error(resp) }
-    return true
+    resp, err := send_request(conn, c, k.FC_WRITE_MULTIPLE_COILS, pdu)
+    return err
 }
