@@ -1,0 +1,35 @@
+std := import("std")
+b   := std.bytes
+
+// Byte codec for Modbus TCP framing, built on std.bytes.
+
+// u8hex returns the 2-character lowercase hex string for byte n (0-255).
+// Kept for diagnostics / human-readable traces.
+pub func u8hex(n int) string {
+    return std.hex.encode(b.u8(n & 255))
+}
+
+// u16hex returns the 4-character big-endian hex string for a 16-bit value.
+pub func u16hex(n int) string {
+    return std.hex.encode(b.u16be(n & 65535))
+}
+
+// pack converts an array of byte values (0-255 each) to a binary string.
+pub func pack(bs []int) string {
+    return b.pack(bs)
+}
+
+// unpack converts a binary string to an array of byte values.
+pub func unpack(data string) []int {
+    return b.unpack(data)
+}
+
+// u8at reads one byte from a decoded byte array.
+pub func u8at(bs []int, i int) int {
+    return bs[i] & 255
+}
+
+// u16at reads a big-endian 16-bit unsigned value from a decoded byte array.
+pub func u16at(bs []int, i int) int {
+    return (bs[i] & 255) * 256 + (bs[i + 1] & 255)
+}

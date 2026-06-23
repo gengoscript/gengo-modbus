@@ -1,0 +1,36 @@
+// Modbus function codes.
+pub const FC_READ_COILS           := 1
+pub const FC_READ_DISCRETE_INPUTS := 2
+pub const FC_READ_HOLDING_REGS    := 3
+pub const FC_READ_INPUT_REGS      := 4
+pub const FC_WRITE_SINGLE_COIL    := 5
+pub const FC_WRITE_SINGLE_REG     := 6
+pub const FC_WRITE_MULTIPLE_COILS := 15
+pub const FC_WRITE_MULTIPLE_REGS  := 16
+
+// Exception response flag: response FC = request FC | 0x80.
+pub const FC_EXCEPTION_FLAG := 128
+
+// Modbus exception codes.
+pub const EX_ILLEGAL_FUNCTION     := 1
+pub const EX_ILLEGAL_ADDRESS      := 2
+pub const EX_ILLEGAL_VALUE        := 3
+pub const EX_DEVICE_FAILURE       := 4
+pub const EX_ACKNOWLEDGE          := 5
+pub const EX_DEVICE_BUSY          := 6
+pub const EX_PARITY_ERROR         := 8
+pub const EX_GATEWAY_UNAVAIL      := 10
+pub const EX_GATEWAY_NO_RESPONSE  := 11
+
+pub func exception_name(code int) string {
+    if code == EX_ILLEGAL_FUNCTION    { return "IllegalFunction" }
+    if code == EX_ILLEGAL_ADDRESS     { return "IllegalAddress" }
+    if code == EX_ILLEGAL_VALUE       { return "IllegalValue" }
+    if code == EX_DEVICE_FAILURE      { return "DeviceFailure" }
+    if code == EX_ACKNOWLEDGE         { return "Acknowledge" }
+    if code == EX_DEVICE_BUSY         { return "DeviceBusy" }
+    if code == EX_PARITY_ERROR        { return "ParityError" }
+    if code == EX_GATEWAY_UNAVAIL     { return "GatewayUnavailable" }
+    if code == EX_GATEWAY_NO_RESPONSE { return "GatewayNoResponse" }
+    return "UnknownException(" + string(code) + ")"
+}

@@ -1,0 +1,64 @@
+std := import("std")
+b   := import("./bytes")
+k   := import("./constants")
+
+// Response holds a parsed Modbus TCP response.
+pub type Response struct {
+    tx_id          int,
+    unit_id        int,
+    func_code      int,
+    data           []int,
+    is_exception   bool,
+    exception_code int,
+}
+
+// build assembles a Modbus TCP ADU (MBAP header + PDU) ready to send.
+//
+// MBAP layout (7 bytes):
+//   [0-1] transaction id   (big-endian uint16)
+//   [2-3] protocol id      (always 0x0000)
+//   [4-5] length           (unit_id byte + function code byte + pdu_data bytes)
+//   [6]   unit id
+// Followed immediately by:
+//   [7]   function code
+//   [8+]  pdu_data
+pub func build(tx_id int, unit_id int, func_code int, pdu_data []int) string {
+    pdu_len    := 1 + 1 + std.core.len(pdu_data)   // unit_id + fc + data
+    header_hex := b.u16hex(tx_id) + "0000" + b.u16hex(pdu_len) + b.u8hex(unit_id)
+    pdu_hex    := b.u8hex(func_code)
+    for d in pdu_data {
+        pdu_hex = pdu_hex + b.u8hex(d)
+    }
+    return std.hex.decode(header_hex + pdu_hex)
+}
+
+// parse decodes a raw Modbus TCP response frame into a Response.
+pub func parse(raw string) Response {
+    bs := b.unpack(raw)
+    if std.core.len(bs) < 8 {
+        return Response {
+            tx_id: 0, unit_id: 0, func_code: 0,
+            data: [], is_exception: true, exception_code: -1,
+        }
+    }
+    tx_id     := b.u16at(bs, 0)
+    unit_id   := b.u8at(bs, 6)
+    fc        := b.u8at(bs, 7)
+    is_exc    := (fc & k.FC_EXCEPTION_FLAG) != 0
+    actual_fc := fc & (255 - k.FC_EXCEPTION_FLAG)
+    exc_code  := 0
+    payload   := []
+    if is_exc {
+        if std.core.len(bs) > 8 { exc_code = b.u8at(bs, 8) }
+    } else {
+        i := 8
+        for i < std.core.len(bs) {
+            payload = std.core.append(payload, b.u8at(bs, i))
+            i = i + 1
+        }
+    }
+    return Response {
+        tx_id: tx_id, unit_id: unit_id, func_code: actual_fc,
+        data: payload, is_exception: is_exc, exception_code: exc_code,
+    }
+}
