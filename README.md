@@ -13,7 +13,7 @@ operators, structural interfaces, and the `cap:net` TCP capability.
 ## Usage
 
 ```bash
-gengo --cap net --modules ./modbus client.gengo
+gengo --cap net --modules ./modbus demo.gengo
 ```
 
 The demo connects to `127.0.0.1:5020`, reads holding registers, writes a
@@ -21,7 +21,7 @@ register and a coil, reads coils, and writes/reads back multiple registers.
 
 ### Changing the target
 
-Edit the constants at the top of `client.gengo`:
+Edit the constants at the top of `demo.gengo`:
 
 ```gengo
 host    := "192.168.1.10"
@@ -36,7 +36,7 @@ modbus/
   constants.gengo   Function codes and exception codes
   frame.gengo       MBAP frame build + parse; exports Response struct
   client.gengo      Request helpers; exports Client struct and Connection interface
-client.gengo        Demo script
+demo.gengo          Demo script
 ```
 
 ## API

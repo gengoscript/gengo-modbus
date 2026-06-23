@@ -1,0 +1,130 @@
+// Modbus TCP client demo.
+//
+// Connects to a Modbus TCP server (default: 127.0.0.1:5020, unit 1),
+// reads holding registers and coils, writes a register, then reads back.
+//
+// Run against any Modbus simulator, e.g.:
+//   diagslave -m tcp -p 5020
+//   pymodbus.simulator --host 127.0.0.1 --port 5020
+//
+// Usage:
+//   gengo --cap net --modules ./modbus client.gengo
+
+std := import("std")
+net := import("cap:net")
+mb  := import("./modbus/client")
+
+host    := "127.0.0.1"
+port    := 5020
+unit_id := 1
+
+func print_error(msg string, err string) {
+    std.io.println("  error: " + msg + ": " + err)
+}
+
+func run() {
+    addr := host + ":" + std.conv.to_string(port)
+    std.io.println("connecting to " + addr + " unit " + std.conv.to_string(unit_id))
+
+    conn := net.dial("tcp", addr)
+    if std.core.is_error(conn) {
+        std.io.eprintln("connect " + addr + ": " + string(conn))
+        return
+    }
+    defer conn.close()
+    conn.set_deadline(5000)
+
+    client := mb.Client { unit_id: unit_id, tx_id: 0 }
+
+    // ── read 5 holding registers at address 0 ────────────────────────────────
+
+    std.io.println("")
+    std.io.println("read holding registers 0..4")
+    regs := mb.read_holding_registers(conn, client, 0, 5)
+    if std.core.is_error(regs) {
+        print_error("read_holding_registers", string(regs))
+    } else {
+        i := 0
+        for r in regs {
+            std.io.println("  reg[" + std.conv.to_string(i) + "] = " + std.conv.to_string(r))
+            i = i + 1
+        }
+    }
+
+    // ── write register 0 ─────────────────────────────────────────────────────
+
+    std.io.println("")
+    std.io.println("write register 0 = 42")
+    ok := mb.write_single_register(conn, client, 0, 42)
+    if std.core.is_error(ok) {
+        print_error("write_single_register", string(ok))
+    } else {
+        std.io.println("  ok")
+    }
+
+    // ── read back register 0 ─────────────────────────────────────────────────
+
+    std.io.println("")
+    std.io.println("read back register 0")
+    regs = mb.read_holding_registers(conn, client, 0, 1)
+    if std.core.is_error(regs) {
+        print_error("read_holding_registers", string(regs))
+    } else {
+        std.io.println("  reg[0] = " + std.conv.to_string(regs[0]))
+    }
+
+    // ── write and read coils ──────────────────────────────────────────────────
+
+    std.io.println("")
+    std.io.println("write coil 0 = ON")
+    ok = mb.write_single_coil(conn, client, 0, true)
+    if std.core.is_error(ok) {
+        print_error("write_single_coil", string(ok))
+    } else {
+        std.io.println("  ok")
+    }
+
+    std.io.println("")
+    std.io.println("read coils 0..7")
+    coils := mb.read_coils(conn, client, 0, 8)
+    if std.core.is_error(coils) {
+        print_error("read_coils", string(coils))
+    } else {
+        i := 0
+        for c in coils {
+            val := "OFF"
+            if c { val = "ON" }
+            std.io.println("  coil[" + std.conv.to_string(i) + "] = " + val)
+            i = i + 1
+        }
+    }
+
+    // ── write multiple registers ──────────────────────────────────────────────
+
+    std.io.println("")
+    std.io.println("write registers 10..14 = [100, 200, 300, 400, 500]")
+    ok = mb.write_multiple_registers(conn, client, 10, [100, 200, 300, 400, 500])
+    if std.core.is_error(ok) {
+        print_error("write_multiple_registers", string(ok))
+    } else {
+        std.io.println("  ok")
+    }
+
+    std.io.println("")
+    std.io.println("read back registers 10..14")
+    regs = mb.read_holding_registers(conn, client, 10, 5)
+    if std.core.is_error(regs) {
+        print_error("read_holding_registers", string(regs))
+    } else {
+        i := 0
+        for r in regs {
+            std.io.println("  reg[" + std.conv.to_string(10 + i) + "] = " + std.conv.to_string(r))
+            i = i + 1
+        }
+    }
+
+    std.io.println("")
+    std.io.println("done")
+}
+
+run()
