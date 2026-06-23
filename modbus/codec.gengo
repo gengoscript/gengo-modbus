@@ -24,14 +24,20 @@
 //   ABCD → [AB, CD, EF, GH]   CDAB → [GH, EF, CD, AB]
 //   BADC → [BA, DC, FE, HG]   DCBA → [HG, FE, DC, BA]
 //
-// Usage:
-//   cdc := Codec { byte_order: CDAB }   // Schneider / Modicon default
+// Direct access (random index):
+//   cdc  := Codec { byte_order: CDAB }
+//   val  := cdc.f32(regs, 4)          // decode float at register index 4
+//   out  := cdc.f32_regs(3.14)        // encode → 2 register values
 //
-//   regs := mb.read_holding_registers(conn, client, 100, 2)
-//   val  := cdc.f32(regs, 0)            // decode float at register index 0
+// Sequential access (cursor):
+//   r    := cdc.reader(regs)
+//   temp := r.f32()                   // consumes regs[0..1], cursor → 2
+//   pres := r.f32()                   // consumes regs[2..3], cursor → 4
 //
-//   out  := cdc.f32_regs(3.14)          // encode float → 2 register values
-//   mb.write_multiple_registers(conn, client, 100, out)
+//   w    := cdc.writer()
+//   w.f32(3.14)
+//   w.f32(1.013)
+//   mb.write_multiple_registers(conn, client, 100, w.regs())
 
 std := import("std")
 b   := std.bytes
@@ -41,79 +47,153 @@ pub const CDAB := "CDAB"
 pub const BADC := "BADC"
 pub const DCBA := "DCBA"
 
-// Codec holds the byte-order convention for a specific device.
-pub type Codec struct {
-    byte_order string,
-}
+// ── shared helpers ───────────────────────────────────────────────────────────
 
-// ── 32-bit IEEE 754 float (2 registers) ─────────────────────────────────────
-
-// f32 decodes a 32-bit IEEE 754 float from two consecutive registers at index i.
-func (c Codec) f32(regs []int, i int) float {
+func _f32(order string, regs []int, i int) float {
     raw := b.u16be(regs[i]) + b.u16be(regs[i + 1])
-    if c.byte_order == CDAB { raw = b.u16be(regs[i + 1]) + b.u16be(regs[i]) }
-    if c.byte_order == BADC { raw = b.u16le(regs[i]) + b.u16le(regs[i + 1]) }
-    if c.byte_order == DCBA { raw = b.u16le(regs[i + 1]) + b.u16le(regs[i]) }
+    if order == CDAB { raw = b.u16be(regs[i + 1]) + b.u16be(regs[i]) }
+    if order == BADC { raw = b.u16le(regs[i]) + b.u16le(regs[i + 1]) }
+    if order == DCBA { raw = b.u16le(regs[i + 1]) + b.u16le(regs[i]) }
     return b.f32be_at(raw, 0)
 }
 
-// f32_regs encodes a 32-bit IEEE 754 float to two register values.
-func (c Codec) f32_regs(v float) []int {
+func _f32_regs(order string, v float) []int {
     raw := b.f32be(v)
-    if c.byte_order == ABCD { return [b.u16be_at(raw, 0), b.u16be_at(raw, 2)] }
-    if c.byte_order == CDAB { return [b.u16be_at(raw, 2), b.u16be_at(raw, 0)] }
-    if c.byte_order == BADC { return [b.u16le_at(raw, 0), b.u16le_at(raw, 2)] }
+    if order == ABCD { return [b.u16be_at(raw, 0), b.u16be_at(raw, 2)] }
+    if order == CDAB { return [b.u16be_at(raw, 2), b.u16be_at(raw, 0)] }
+    if order == BADC { return [b.u16le_at(raw, 0), b.u16le_at(raw, 2)] }
     return [b.u16le_at(raw, 2), b.u16le_at(raw, 0)]
 }
 
-// ── 64-bit IEEE 754 double (4 registers) ────────────────────────────────────
-
-// f64 decodes a 64-bit IEEE 754 double from four consecutive registers at index i.
-func (c Codec) f64(regs []int, i int) float {
+func _f64(order string, regs []int, i int) float {
     raw := b.u16be(regs[i]) + b.u16be(regs[i+1]) + b.u16be(regs[i+2]) + b.u16be(regs[i+3])
-    if c.byte_order == CDAB {
+    if order == CDAB {
         raw = b.u16be(regs[i+3]) + b.u16be(regs[i+2]) + b.u16be(regs[i+1]) + b.u16be(regs[i])
     }
-    if c.byte_order == BADC {
+    if order == BADC {
         raw = b.u16le(regs[i]) + b.u16le(regs[i+1]) + b.u16le(regs[i+2]) + b.u16le(regs[i+3])
     }
-    if c.byte_order == DCBA {
+    if order == DCBA {
         raw = b.u16le(regs[i+3]) + b.u16le(regs[i+2]) + b.u16le(regs[i+1]) + b.u16le(regs[i])
     }
     return b.f64be_at(raw, 0)
 }
 
-// f64_regs encodes a 64-bit IEEE 754 double to four register values.
-func (c Codec) f64_regs(v float) []int {
+func _f64_regs(order string, v float) []int {
     raw := b.f64be(v)
-    if c.byte_order == ABCD {
+    if order == ABCD {
         return [b.u16be_at(raw, 0), b.u16be_at(raw, 2), b.u16be_at(raw, 4), b.u16be_at(raw, 6)]
     }
-    if c.byte_order == CDAB {
+    if order == CDAB {
         return [b.u16be_at(raw, 6), b.u16be_at(raw, 4), b.u16be_at(raw, 2), b.u16be_at(raw, 0)]
     }
-    if c.byte_order == BADC {
+    if order == BADC {
         return [b.u16le_at(raw, 0), b.u16le_at(raw, 2), b.u16le_at(raw, 4), b.u16le_at(raw, 6)]
     }
     return [b.u16le_at(raw, 6), b.u16le_at(raw, 4), b.u16le_at(raw, 2), b.u16le_at(raw, 0)]
 }
 
-// ── 32-bit unsigned integer (2 registers) ───────────────────────────────────
-
-// u32 decodes a 32-bit unsigned integer from two consecutive registers at index i.
-func (c Codec) u32(regs []int, i int) int {
+func _u32(order string, regs []int, i int) int {
     raw := b.u16be(regs[i]) + b.u16be(regs[i + 1])
-    if c.byte_order == CDAB { raw = b.u16be(regs[i + 1]) + b.u16be(regs[i]) }
-    if c.byte_order == BADC { raw = b.u16le(regs[i]) + b.u16le(regs[i + 1]) }
-    if c.byte_order == DCBA { raw = b.u16le(regs[i + 1]) + b.u16le(regs[i]) }
+    if order == CDAB { raw = b.u16be(regs[i + 1]) + b.u16be(regs[i]) }
+    if order == BADC { raw = b.u16le(regs[i]) + b.u16le(regs[i + 1]) }
+    if order == DCBA { raw = b.u16le(regs[i + 1]) + b.u16le(regs[i]) }
     return b.u32be_at(raw, 0)
 }
 
-// u32_regs encodes a 32-bit unsigned integer to two register values.
-func (c Codec) u32_regs(v int) []int {
+func _u32_regs(order string, v int) []int {
     raw := b.u32be(v)
-    if c.byte_order == ABCD { return [b.u16be_at(raw, 0), b.u16be_at(raw, 2)] }
-    if c.byte_order == CDAB { return [b.u16be_at(raw, 2), b.u16be_at(raw, 0)] }
-    if c.byte_order == BADC { return [b.u16le_at(raw, 0), b.u16le_at(raw, 2)] }
+    if order == ABCD { return [b.u16be_at(raw, 0), b.u16be_at(raw, 2)] }
+    if order == CDAB { return [b.u16be_at(raw, 2), b.u16be_at(raw, 0)] }
+    if order == BADC { return [b.u16le_at(raw, 0), b.u16le_at(raw, 2)] }
     return [b.u16le_at(raw, 2), b.u16le_at(raw, 0)]
 }
+
+// ── Reader ───────────────────────────────────────────────────────────────────
+//
+// Sequential cursor over a register slice.  Each call consumes the next N
+// registers and advances the cursor automatically.  Obtain via Codec.reader().
+
+pub type Reader struct {
+    byte_order string,
+    regs       []int,
+    pos        int,
+}
+
+func (r Reader) f32() float {
+    v     := _f32(r.byte_order, r.regs, r.pos)
+    r.pos  = r.pos + 2
+    return v
+}
+
+func (r Reader) f64() float {
+    v     := _f64(r.byte_order, r.regs, r.pos)
+    r.pos  = r.pos + 4
+    return v
+}
+
+func (r Reader) u32() int {
+    v     := _u32(r.byte_order, r.regs, r.pos)
+    r.pos  = r.pos + 2
+    return v
+}
+
+func (r Reader) u16() int {
+    v     := r.regs[r.pos] & 0xFFFF
+    r.pos  = r.pos + 1
+    return v
+}
+
+// ── Writer ───────────────────────────────────────────────────────────────────
+//
+// Accumulates register values in order.  Call regs() to retrieve the completed
+// slice for passing to write_multiple_registers.  Obtain via Codec.writer().
+
+pub type Writer struct {
+    byte_order string,
+    out        []int,
+}
+
+func (w Writer) f32(v float) {
+    for reg in _f32_regs(w.byte_order, v) { w.out = std.core.append(w.out, reg) }
+}
+
+func (w Writer) f64(v float) {
+    for reg in _f64_regs(w.byte_order, v) { w.out = std.core.append(w.out, reg) }
+}
+
+func (w Writer) u32(v int) {
+    for reg in _u32_regs(w.byte_order, v) { w.out = std.core.append(w.out, reg) }
+}
+
+func (w Writer) u16(v int) {
+    w.out = std.core.append(w.out, v & 0xFFFF)
+}
+
+func (w Writer) regs() []int {
+    return w.out
+}
+
+// ── Codec ────────────────────────────────────────────────────────────────────
+
+// Codec holds the byte-order convention for a specific device.
+pub type Codec struct {
+    byte_order string,
+}
+
+// reader returns a Reader cursor over regs using this codec's byte order.
+func (c Codec) reader(regs []int) Reader {
+    return Reader { byte_order: c.byte_order, regs: regs, pos: 0 }
+}
+
+// writer returns a Writer that accumulates register values using this codec's byte order.
+func (c Codec) writer() Writer {
+    return Writer { byte_order: c.byte_order, out: [] }
+}
+
+func (c Codec) f32(regs []int, i int) float     { return _f32(c.byte_order, regs, i) }
+func (c Codec) f32_regs(v float) []int          { return _f32_regs(c.byte_order, v) }
+func (c Codec) f64(regs []int, i int) float     { return _f64(c.byte_order, regs, i) }
+func (c Codec) f64_regs(v float) []int          { return _f64_regs(c.byte_order, v) }
+func (c Codec) u32(regs []int, i int) int       { return _u32(c.byte_order, regs, i) }
+func (c Codec) u32_regs(v int) []int            { return _u32_regs(c.byte_order, v) }

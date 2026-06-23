@@ -124,14 +124,16 @@ func run() {
         }
     }
 
-    // ── write and read back a 32-bit float (CDAB byte order) ─────────────────
+    // ── write and read back floats via cursor API (CDAB byte order) ──────────
 
-    codec  := cdc.Codec { byte_order: cdc.CDAB }
-    fwrite := 3.14159
+    codec := cdc.Codec { byte_order: cdc.CDAB }
 
     std.io.println("")
-    std.io.println("write float32 " + std.conv.to_string(fwrite) + " to registers 20..21 (CDAB)")
-    ok = mb.write_multiple_registers(conn, client, 20, codec.f32_regs(fwrite))
+    std.io.println("write float32 3.14159 and float32 2.71828 to registers 20..23 (CDAB)")
+    w := codec.writer()
+    w.f32(3.14159)
+    w.f32(2.71828)
+    ok = mb.write_multiple_registers(conn, client, 20, w.regs())
     if std.core.is_error(ok) {
         print_error("write_multiple_registers", string(ok))
     } else {
@@ -139,13 +141,14 @@ func run() {
     }
 
     std.io.println("")
-    std.io.println("read back registers 20..21 and decode float32")
-    regs = mb.read_holding_registers(conn, client, 20, 2)
+    std.io.println("read back registers 20..23 and decode via reader cursor")
+    regs = mb.read_holding_registers(conn, client, 20, 4)
     if std.core.is_error(regs) {
         print_error("read_holding_registers", string(regs))
     } else {
-        fread := codec.f32(regs, 0)
-        std.io.println("  decoded = " + std.conv.to_string(fread))
+        r := codec.reader(regs)
+        std.io.println("  pi    = " + std.conv.to_string(r.f32()))
+        std.io.println("  euler = " + std.conv.to_string(r.f32()))
     }
 
     std.io.println("")
