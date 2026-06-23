@@ -8,11 +8,12 @@
 //   pymodbus.simulator --host 127.0.0.1 --port 5020
 //
 // Usage:
-//   gengo --cap net --modules ./modbus client.gengo
+//   gengo --cap net --modules ./modbus demo.gengo
 
 std := import("std")
 net := import("cap:net")
 mb  := import("./modbus/client")
+cdc := import("./modbus/codec")
 
 host    := "127.0.0.1"
 port    := 5020
@@ -121,6 +122,30 @@ func run() {
             std.io.println("  reg[" + std.conv.to_string(10 + i) + "] = " + std.conv.to_string(r))
             i = i + 1
         }
+    }
+
+    // ── write and read back a 32-bit float (CDAB byte order) ─────────────────
+
+    codec  := cdc.Codec { byte_order: cdc.CDAB }
+    fwrite := 3.14159
+
+    std.io.println("")
+    std.io.println("write float32 " + std.conv.to_string(fwrite) + " to registers 20..21 (CDAB)")
+    ok = mb.write_multiple_registers(conn, client, 20, codec.f32_regs(fwrite))
+    if std.core.is_error(ok) {
+        print_error("write_multiple_registers", string(ok))
+    } else {
+        std.io.println("  ok")
+    }
+
+    std.io.println("")
+    std.io.println("read back registers 20..21 and decode float32")
+    regs = mb.read_holding_registers(conn, client, 20, 2)
+    if std.core.is_error(regs) {
+        print_error("read_holding_registers", string(regs))
+    } else {
+        fread := codec.f32(regs, 0)
+        std.io.println("  decoded = " + std.conv.to_string(fread))
     }
 
     std.io.println("")
