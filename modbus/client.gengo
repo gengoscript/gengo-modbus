@@ -1,5 +1,4 @@
 std := import("std")
-b   := import("./bytes")
 fr  := import("./frame")
 k   := import("./constants")
 
@@ -52,8 +51,7 @@ func recv(conn Connection) fr.Response {
             data: [], is_exception: true, exception_code: -1,
         }
     }
-    hdr_bytes   := b.unpack(header)
-    payload_len := b.u16at(hdr_bytes, 4)   // unit_id + FC + data
+    payload_len := std.bytes.u16be_at(header, 4)   // unit_id + FC + data
     body := read_exact(conn, payload_len)
     if std.core.is_error(body) {
         return fr.Response {
@@ -86,7 +84,7 @@ pub func read_holding_registers(conn Connection, c Client, address int, count in
     regs := []
     i := 1   // skip byte-count at data[0]
     for i + 1 <= std.core.len(resp.data) {
-        regs = std.core.append(regs, b.u16at(resp.data, i))
+        regs = std.core.append(regs, (resp.data[i] & 255) * 256 + (resp.data[i + 1] & 255))
         i = i + 2
     }
     return regs
@@ -105,7 +103,7 @@ pub func read_input_registers(conn Connection, c Client, address int, count int)
     regs := []
     i := 1
     for i + 1 <= std.core.len(resp.data) {
-        regs = std.core.append(regs, b.u16at(resp.data, i))
+        regs = std.core.append(regs, (resp.data[i] & 255) * 256 + (resp.data[i + 1] & 255))
         i = i + 2
     }
     return regs

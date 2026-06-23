@@ -1,5 +1,5 @@
 std := import("std")
-b   := import("./bytes")
+b   := std.bytes
 k   := import("./constants")
 
 // Response holds a parsed Modbus TCP response.
@@ -23,37 +23,40 @@ pub type Response struct {
 //   [7]   function code
 //   [8+]  pdu_data
 pub func build(tx_id int, unit_id int, func_code int, pdu_data []int) string {
-    pdu_len    := 1 + 1 + std.core.len(pdu_data)   // unit_id + fc + data
-    header_hex := b.u16hex(tx_id) + "0000" + b.u16hex(pdu_len) + b.u8hex(unit_id)
-    pdu_hex    := b.u8hex(func_code)
+    pdu_len := 1 + 1 + std.core.len(pdu_data)
+    sb      := std.string.builder()
+    sb.write(b.u16be(tx_id))
+    sb.write(b.u16be(0))
+    sb.write(b.u16be(pdu_len))
+    sb.write(b.u8(unit_id))
+    sb.write(b.u8(func_code))
     for d in pdu_data {
-        pdu_hex = pdu_hex + b.u8hex(d)
+        sb.write(b.u8(d))
     }
-    return std.hex.decode(header_hex + pdu_hex)
+    return sb.str()
 }
 
 // parse decodes a raw Modbus TCP response frame into a Response.
 pub func parse(raw string) Response {
-    bs := b.unpack(raw)
-    if std.core.len(bs) < 8 {
+    if std.core.bytelen(raw) < 8 {
         return Response {
             tx_id: 0, unit_id: 0, func_code: 0,
             data: [], is_exception: true, exception_code: -1,
         }
     }
-    tx_id     := b.u16at(bs, 0)
-    unit_id   := b.u8at(bs, 6)
-    fc        := b.u8at(bs, 7)
+    tx_id     := b.u16be_at(raw, 0)
+    unit_id   := b.at(raw, 6)
+    fc        := b.at(raw, 7)
     is_exc    := (fc & k.FC_EXCEPTION_FLAG) != 0
     actual_fc := fc & (255 - k.FC_EXCEPTION_FLAG)
     exc_code  := 0
     payload   := []
     if is_exc {
-        if std.core.len(bs) > 8 { exc_code = b.u8at(bs, 8) }
+        if std.core.bytelen(raw) > 8 { exc_code = b.at(raw, 8) }
     } else {
         i := 8
-        for i < std.core.len(bs) {
-            payload = std.core.append(payload, b.u8at(bs, i))
+        for i < std.core.bytelen(raw) {
+            payload = std.core.append(payload, b.at(raw, i))
             i = i + 1
         }
     }
