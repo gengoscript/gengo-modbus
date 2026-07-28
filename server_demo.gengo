@@ -1,0 +1,130 @@
+// Modbus TCP server demo — simulated temperature controller.
+//
+// Simulates a small industrial temperature controller using range-based callbacks:
+//   - Float32 temperature sensor at registers 10–11 (dynamic read)
+//   - Float32 humidity sensor at registers 12–13 (dynamic read)
+//   - Single-register setpoint at register 0 (writable, clamped)
+//   - Actuator coils (heater, fan) with write callbacks
+//   - Dynamic alarm coil computed from sensor vs. setpoint
+//
+// Run the server:
+//   gengo --cap net=listen --net-listen-allow 127.0.0.1:5020 --modules ./modbus server_demo.gengo
+//
+// In another terminal, run the client:
+//   gengo --cap net --modules ./modbus demo.gengo
+
+std := import("std")
+mb  := import("./modbus/server")
+
+// Simulated sensor state.
+temp_c    := 2350   // temperature in hundredths of a degree (23.50 C)
+humidity  := 6500   // humidity in hundredths of a percent (65.00 %)
+setpoint  := 2500   // target temperature in hundredths (25.00 C)
+heater_on := false
+fan_on    := false
+
+func clamp(val int, lo int, hi int) int {
+    if val < lo { return lo }
+    if val > hi { return hi }
+    return val
+}
+
+func main() {
+    server := mb.new(1, 100, 100, 64, 64)
+
+    // ── pre-load static data ───────────────────────────────────────────────
+
+    mb.set_holding(server, 0, setpoint)
+    mb.set_holding(server, 1, 5000)   // alarm threshold high
+    mb.set_holding(server, 2, 0)      // alarm threshold low
+    mb.set_input(server, 0, 1234)     // uptime seconds (mock)
+    mb.set_input(server, 1, 1)        // firmware version
+    mb.set_discrete(server, 0, true)  // power OK
+    mb.set_discrete(server, 1, false) // error flag
+
+    // ── holding register range callbacks ────────────────────────────────────
+
+    // Temperature sensor: float32 at registers 10–11 (count=2).
+    // On read, simulate drifting temperature.
+    mb.on_read_holding_range(server, 10, 2, func(addr int, vals []int) []int {
+        if temp_c < setpoint {
+            temp_c = temp_c + 3
+        }
+        if temp_c > setpoint {
+            temp_c = temp_c - 2
+        }
+        // encode as two 16-bit register halves (big-endian)
+        hi := (temp_c >> 8) & 255
+        lo := temp_c & 255
+        return [hi, lo]
+    })
+
+    // Humidity sensor: float32 at registers 12–13 (count=2).
+    mb.on_read_holding_range(server, 12, 2, func(addr int, vals []int) []int {
+        if humidity > 6550 { humidity = humidity - 10 }
+        if humidity < 6450 { humidity = humidity + 10 }
+        hi := (humidity >> 8) & 255
+        lo := humidity & 255
+        return [hi, lo]
+    })
+
+    // Setpoint: single register at address 0 (count=1).
+    // Write callback clamps to safe range.
+    mb.on_write_holding_range(server, 0, 1, func(addr int, vals []int) {
+        setpoint = clamp(vals[0], 1500, 3500)
+        std.io.println("[setpoint] changed to " + std.conv.to_string(setpoint) + " (" + std.conv.to_string(int(setpoint / 100)) + "." + std.conv.to_string(setpoint rem 100) + " C)")
+    })
+
+    // Alarm thresholds: range at registers 1–2 (count=2).
+    // Write callback logs the update.
+    mb.on_write_holding_range(server, 1, 2, func(addr int, vals []int) {
+        std.io.println("[alarm thresholds] hi=" + std.conv.to_string(vals[0]) + " lo=" + std.conv.to_string(vals[1]))
+    })
+
+    // ── coil range callbacks ────────────────────────────────────────────────
+
+    // Heater: single coil at address 0 (count=1).
+    mb.on_write_coil_range(server, 0, 1, func(addr int, vals []bool) {
+        heater_on = vals[0]
+        state := "OFF"
+        if vals[0] { state = "ON" }
+        std.io.println("[heater] " + state)
+    })
+
+    // Fan: single coil at address 1 (count=1).
+    mb.on_write_coil_range(server, 1, 1, func(addr int, vals []bool) {
+        fan_on = vals[0]
+        state := "OFF"
+        if vals[0] { state = "ON" }
+        std.io.println("[fan] " + state)
+    })
+
+    // Alarm: single coil at address 2 (dynamic read).
+    mb.on_read_coil_range(server, 2, 1, func(addr int, vals []bool) []bool {
+        return [temp_c > setpoint + 500]
+    })
+
+    // ── banner ──────────────────────────────────────────────────────────────
+
+    std.io.println("modbus tcp server demo — temperature controller")
+    std.io.println("  address: 127.0.0.1:5020")
+    std.io.println("  unit_id: 1")
+    std.io.println("")
+    std.io.println("holding register ranges:")
+    std.io.println("  [0]      setpoint       (1 reg,  r/w, clamped 15.00–35.00 C)")
+    std.io.println("  [1–2]    alarm thresholds (2 reg, w)")
+    std.io.println("  [10–11]  temperature    (2 reg,  dynamic read)")
+    std.io.println("  [12–13]  humidity       (2 reg,  dynamic read)")
+    std.io.println("")
+    std.io.println("coil ranges:")
+    std.io.println("  [0]      heater         (1 coil, w, logs on/off)")
+    std.io.println("  [1]      fan            (1 coil, w, logs on/off)")
+    std.io.println("  [2]      alarm          (1 coil, dynamic: temp > setpoint + 5C)")
+    std.io.println("")
+    std.io.println("connect with: gengo --cap net --modules ./modbus demo.gengo")
+    std.io.println("")
+
+    mb.listen("127.0.0.1:5020", server)
+}
+
+main()

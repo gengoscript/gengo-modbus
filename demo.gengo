@@ -1,11 +1,14 @@
 // Modbus TCP client demo.
 //
-// Connects to a Modbus TCP server (default: 127.0.0.1:5020, unit 1),
-// reads holding registers and coils, writes a register, then reads back.
-//
-// Run against any Modbus simulator, e.g.:
-//   diagslave -m tcp -p 5020
-//   pymodbus.simulator --host 127.0.0.1 --port 5020
+// Connects to the simulated temperature controller server and exercises
+// all range-based callbacks:
+//   - Reads temperature (registers 10–11) and humidity (12–13) ranges
+//   - Writes a new setpoint (single-register range, triggers clamping callback)
+//   - Writes alarm thresholds (2-register range, triggers log callback)
+//   - Toggles heater and fan coils (single-coil ranges)
+//   - Reads the dynamic alarm coil
+//   - Tests partial-range error (reading just register 10 should fail)
+//   - Reads/writes float registers via codec
 //
 // Usage:
 //   gengo --cap net --modules ./modbus demo.gengo
@@ -18,10 +21,6 @@ cdc := import("./modbus/codec")
 host    := "127.0.0.1"
 port    := 5020
 unit_id := 1
-
-func print_error(msg string, err string) {
-    std.io.println("  error: " + msg + ": " + err)
-}
 
 func run() {
     addr := host + ":" + std.conv.to_string(port)
@@ -37,94 +36,140 @@ func run() {
 
     client := mb.Client { unit_id: unit_id, tx_id: 0 }
 
-    // ── read 5 holding registers at address 0 ────────────────────────────────
+    // ── read temperature range (registers 10–11) ────────────────────────────
 
     std.io.println("")
-    std.io.println("read holding registers 0..4")
-    regs := mb.read_holding_registers(conn, client, 0, 5)
-    if std.core.is_error(regs) {
-        print_error("read_holding_registers", string(regs))
+    std.io.println("read temperature (registers 10–11, range=2)")
+    regs := mb.read_holding_registers(conn, client, 10, 2)
+    if std.core.len(regs) == 0 {
+        std.io.println("  error: read failed")
     } else {
-        i := 0
-        for r in regs {
-            std.io.println("  reg[" + std.conv.to_string(i) + "] = " + std.conv.to_string(r))
-            i = i + 1
-        }
+        // decode 16-bit halves back to full value
+        temp := (regs[0] & 255) * 256 + (regs[1] & 255)
+        std.io.println("  temperature = " + std.conv.to_string(int(temp / 100)) + "." + std.conv.to_string(temp rem 100) + " C")
+        std.io.println("  raw regs:   [" + std.conv.to_string(regs[0]) + ", " + std.conv.to_string(regs[1]) + "]")
     }
 
-    // ── write register 0 ─────────────────────────────────────────────────────
+    // ── read humidity range (registers 12–13) ───────────────────────────────
 
     std.io.println("")
-    std.io.println("write register 0 = 42")
-    ok := mb.write_single_register(conn, client, 0, 42)
-    if std.core.is_error(ok) {
-        print_error("write_single_register", string(ok))
+    std.io.println("read humidity (registers 12–13, range=2)")
+    regs = mb.read_holding_registers(conn, client, 12, 2)
+    if std.core.len(regs) == 0 {
+        std.io.println("  error: read failed")
     } else {
-        std.io.println("  ok")
+        hum := (regs[0] & 255) * 256 + (regs[1] & 255)
+        std.io.println("  humidity    = " + std.conv.to_string(int(hum / 100)) + "." + std.conv.to_string(hum rem 100) + " %")
     }
 
-    // ── read back register 0 ─────────────────────────────────────────────────
+    // ── read setpoint (single register, count=1 range) ──────────────────────
 
     std.io.println("")
-    std.io.println("read back register 0")
+    std.io.println("read setpoint (register 0)")
     regs = mb.read_holding_registers(conn, client, 0, 1)
-    if std.core.is_error(regs) {
-        print_error("read_holding_registers", string(regs))
+    if std.core.len(regs) == 0 {
+        std.io.println("  error: read failed")
     } else {
-        std.io.println("  reg[0] = " + std.conv.to_string(regs[0]))
+        std.io.println("  setpoint = " + std.conv.to_string(regs[0]) + " (" + std.conv.to_string(int(regs[0] / 100)) + "." + std.conv.to_string(regs[0] rem 100) + " C)")
     }
 
-    // ── write and read coils ──────────────────────────────────────────────────
+    // ── write new setpoint (triggers clamping callback) ──────────────────────
 
     std.io.println("")
-    std.io.println("write coil 0 = ON")
-    ok = mb.write_single_coil(conn, client, 0, true)
-    if std.core.is_error(ok) {
-        print_error("write_single_coil", string(ok))
+    std.io.println("write setpoint = 28.00 C (2800)")
+    ok := mb.write_single_register(conn, client, 0, 2800)
+    if ok != "" {
+        std.io.println("  error: " + ok)
     } else {
         std.io.println("  ok")
     }
 
+    // read back
     std.io.println("")
-    std.io.println("read coils 0..7")
-    coils := mb.read_coils(conn, client, 0, 8)
-    if std.core.is_error(coils) {
-        print_error("read_coils", string(coils))
+    std.io.println("read back setpoint")
+    regs = mb.read_holding_registers(conn, client, 0, 1)
+    if std.core.len(regs) == 0 {
+        std.io.println("  error: read failed")
     } else {
+        std.io.println("  setpoint = " + std.conv.to_string(regs[0]) + " (" + std.conv.to_string(int(regs[0] / 100)) + "." + std.conv.to_string(regs[0] rem 100) + " C)")
+    }
+
+    // ── write alarm thresholds (range=2, triggers log callback) ─────────────
+
+    std.io.println("")
+    std.io.println("write alarm thresholds (registers 1–2) = [4000, 500]")
+    ok = mb.write_multiple_registers(conn, client, 1, [4000, 500])
+    if ok != "" {
+        std.io.println("  error: " + ok)
+    } else {
+        std.io.println("  ok")
+    }
+
+    // ── toggle heater ───────────────────────────────────────────────────────
+
+    std.io.println("")
+    std.io.println("turn on heater (coil 0)")
+    ok = mb.write_single_coil(conn, client, 0, true)
+    if ok != "" {
+        std.io.println("  error: " + ok)
+    } else {
+        std.io.println("  ok")
+    }
+
+    // ── toggle fan ──────────────────────────────────────────────────────────
+
+    std.io.println("")
+    std.io.println("turn on fan (coil 1)")
+    ok = mb.write_single_coil(conn, client, 1, true)
+    if ok != "" {
+        std.io.println("  error: " + ok)
+    } else {
+        std.io.println("  ok")
+    }
+
+    // ── read alarm coil (dynamic) ───────────────────────────────────────────
+
+    std.io.println("")
+    std.io.println("read alarm coil (dynamic: temp > setpoint + 5C)")
+    coils := mb.read_coils(conn, client, 2, 1)
+    if std.core.len(coils) == 0 {
+        std.io.println("  error: read failed")
+    } else {
+        alarm := "no"
+        if coils[0] { alarm = "YES" }
+        std.io.println("  alarm = " + alarm)
+    }
+
+    // ── read all coils ──────────────────────────────────────────────────────
+
+    std.io.println("")
+    std.io.println("read all coils 0..3")
+    coils = mb.read_coils(conn, client, 0, 4)
+    if std.core.len(coils) == 0 {
+        std.io.println("  error: read failed")
+    } else {
+        labels := ["heater", "fan", "alarm", "spare"]
         i := 0
         for c in coils {
-            val := "OFF"
-            if c { val = "ON" }
-            std.io.println("  coil[" + std.conv.to_string(i) + "] = " + val)
+            state := "OFF"
+            if c { state = "ON" }
+            std.io.println("  " + labels[i] + " [" + std.conv.to_string(i) + "] = " + state)
             i = i + 1
         }
     }
 
-    // ── write multiple registers ──────────────────────────────────────────────
+    // ── test partial-range error (read just register 10, part of range 10–11)
 
     std.io.println("")
-    std.io.println("write registers 10..14 = [100, 200, 300, 400, 500]")
-    ok = mb.write_multiple_registers(conn, client, 10, [100, 200, 300, 400, 500])
-    if std.core.is_error(ok) {
-        print_error("write_multiple_registers", string(ok))
+    std.io.println("test partial-range error (read register 10 alone)")
+    regs = mb.read_holding_registers(conn, client, 10, 1)
+    if std.core.len(regs) == 0 {
+        std.io.println("  correctly rejected: partial read of float32 range")
     } else {
-        std.io.println("  ok")
+        std.io.println("  ERROR: should have been rejected, got " + std.conv.to_string(regs[0]))
     }
 
-    std.io.println("")
-    std.io.println("read back registers 10..14")
-    regs = mb.read_holding_registers(conn, client, 10, 5)
-    if std.core.is_error(regs) {
-        print_error("read_holding_registers", string(regs))
-    } else {
-        i := 0
-        for r in regs {
-            std.io.println("  reg[" + std.conv.to_string(10 + i) + "] = " + std.conv.to_string(r))
-            i = i + 1
-        }
-    }
-
-    // ── write and read back floats via cursor API (CDAB byte order) ──────────
+    // ── write and read back floats via codec (CDAB byte order) ──────────────
 
     codec := cdc.Codec { byte_order: cdc.CDAB }
 
@@ -134,8 +179,8 @@ func run() {
     w.f32(3.14159)
     w.f32(2.71828)
     ok = mb.write_multiple_registers(conn, client, 20, w.regs())
-    if std.core.is_error(ok) {
-        print_error("write_multiple_registers", string(ok))
+    if ok != "" {
+        std.io.println("  error: " + ok)
     } else {
         std.io.println("  ok")
     }
@@ -143,8 +188,8 @@ func run() {
     std.io.println("")
     std.io.println("read back registers 20..23 and decode via reader cursor")
     regs = mb.read_holding_registers(conn, client, 20, 4)
-    if std.core.is_error(regs) {
-        print_error("read_holding_registers", string(regs))
+    if std.core.len(regs) == 0 {
+        std.io.println("  error: read failed")
     } else {
         r := codec.reader(regs)
         std.io.println("  pi    = " + std.conv.to_string(r.f32()))

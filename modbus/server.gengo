@@ -1,0 +1,739 @@
+// Modbus TCP server.
+//
+// Provides a data-store-backed Modbus TCP server that listens for connections
+// and handles all eight standard function codes.  The server is single-threaded
+// (one connection at a time), which matches typical Modbus usage with a single
+// master.
+//
+// Callbacks are range-based: register a callback on a span of registers or
+// coils and the server invokes it for reads/writes that cover the full range.
+// Partial-range access (reading a subset of a registered range) returns an
+// IllegalAddress exception, enforcing atomic access to compound values such as
+// float32 (2 registers) or float64 (4 registers).
+//
+// Usage:
+//   server := import("./modbus/server")
+//   s := server.new(1, 100, 100, 64, 64)
+//
+//   // Float32 range at registers 10–11
+//   server.on_read_holding_range(s, 10, 2, func(addr int, vals []int) []int {
+//       temp := codec.f32(vals, 0) + 0.5
+//       return codec.f32_regs(temp)
+//   })
+//
+//   // Single-register range (count=1)
+//   server.on_write_holding_range(s, 0, 1, func(addr int, vals []int) {
+//       std.io.println("setpoint = " + std.conv.to_string(vals[0]))
+//   })
+//
+//   server.listen("0.0.0.0:5020", s)
+//
+// Run with:  gengo --cap net=listen --net-listen-allow 127.0.0.1:5020 --modules ./modbus server_demo.gengo
+
+std := import("std")
+net := import("cap:net")
+b   := std.bytes
+fr  := import("./frame")
+k   := import("./constants")
+
+// Connection is a structural interface satisfied by cap:net.Conn.
+type Connection interface {
+    read(int) string,
+    write(string) int,
+    close(),
+    set_deadline(int),
+}
+
+// ── range callback entry types ───────────────────────────────────────────────
+
+// RangeEntry is the common interface for all range callback entries.
+// Any struct with start() and count() methods satisfies this interface.
+type RangeEntry interface {
+    start() int,
+    count() int,
+}
+
+// RegRangeReadCb defines a range of holding/input registers with a read callback.
+// The callback receives (start_address, current_values) and returns effective values.
+pub type RegRangeReadCb struct {
+    addr int,
+    len  int,
+    cb   func(int, []int) []int,
+}
+
+func (r RegRangeReadCb) start() int { return r.addr }
+func (r RegRangeReadCb) count() int { return r.len }
+
+// RegRangeWriteCb defines a range with a write callback.
+// The callback fires after the static store is updated.
+pub type RegRangeWriteCb struct {
+    addr int,
+    len  int,
+    cb   func(int, []int),
+}
+
+func (r RegRangeWriteCb) start() int { return r.addr }
+func (r RegRangeWriteCb) count() int { return r.len }
+
+// CoilRangeReadCb defines a range of coils/discrete inputs with a read callback.
+pub type CoilRangeReadCb struct {
+    addr int,
+    len  int,
+    cb   func(int, []bool) []bool,
+}
+
+func (c CoilRangeReadCb) start() int { return c.addr }
+func (c CoilRangeReadCb) count() int { return c.len }
+
+// CoilRangeWriteCb defines a range with a coil write callback.
+pub type CoilRangeWriteCb struct {
+    addr int,
+    len  int,
+    cb   func(int, []bool),
+}
+
+func (c CoilRangeWriteCb) start() int { return c.addr }
+func (c CoilRangeWriteCb) count() int { return c.len }
+
+// ── server struct ────────────────────────────────────────────────────────────
+
+// Server holds Modbus data stores, configuration, and range callbacks.
+pub type Server struct {
+    unit_id         int,
+    holding_regs    []int,
+    input_regs      []int,
+    coils           []bool,
+    discrete_inputs  []bool,
+    // range callbacks
+    on_read_holding   []RegRangeReadCb,
+    on_write_holding  []RegRangeWriteCb,
+    on_read_input     []RegRangeReadCb,
+    on_write_input    []RegRangeWriteCb,
+    on_read_coil      []CoilRangeReadCb,
+    on_write_coil     []CoilRangeWriteCb,
+    on_read_discrete  []CoilRangeReadCb,
+    on_write_discrete []CoilRangeWriteCb,
+}
+
+// ── construction ──────────────────────────────────────────────────────────────
+
+// new creates a Server with zeroed data stores of the given sizes.
+pub func new(unit_id int, holding_count int, input_count int, coil_count int, discrete_count int) Server {
+    holding := []
+    i := 0
+    for i < holding_count {
+        holding = std.core.append(holding, 0)
+        i = i + 1
+    }
+    input := []
+    i = 0
+    for i < input_count {
+        input = std.core.append(input, 0)
+        i = i + 1
+    }
+    c := []
+    i = 0
+    for i < coil_count {
+        c = std.core.append(c, false)
+        i = i + 1
+    }
+    d := []
+    i = 0
+    for i < discrete_count {
+        d = std.core.append(d, false)
+        i = i + 1
+    }
+    return Server {
+        unit_id: unit_id,
+        holding_regs: holding,
+        input_regs: input,
+        coils: c,
+        discrete_inputs: d,
+        on_read_holding: [],
+        on_write_holding: [],
+        on_read_input: [],
+        on_write_input: [],
+        on_read_coil: [],
+        on_write_coil: [],
+        on_read_discrete: [],
+        on_write_discrete: [],
+    }
+}
+
+// ── range callback registration ──────────────────────────────────────────────
+
+// on_read_holding_range registers a read callback for a range of holding registers.
+// The callback receives the start address and current values, and returns effective values.
+// Partial reads of this range return an IllegalAddress exception.
+pub func on_read_holding_range(s Server, start int, count int, cb func(int, []int) []int) {
+    s.on_read_holding = std.core.append(s.on_read_holding, RegRangeReadCb{addr: start, len: count, cb: cb})
+}
+
+// on_write_holding_range registers a write callback for a range of holding registers.
+// The callback fires after the static store is updated.
+pub func on_write_holding_range(s Server, start int, count int, cb func(int, []int)) {
+    s.on_write_holding = std.core.append(s.on_write_holding, RegRangeWriteCb{addr: start, len: count, cb: cb})
+}
+
+// on_read_input_range registers a read callback for a range of input registers.
+pub func on_read_input_range(s Server, start int, count int, cb func(int, []int) []int) {
+    s.on_read_input = std.core.append(s.on_read_input, RegRangeReadCb{addr: start, len: count, cb: cb})
+}
+
+// on_write_input_range registers a write callback for a range of input registers.
+pub func on_write_input_range(s Server, start int, count int, cb func(int, []int)) {
+    s.on_write_input = std.core.append(s.on_write_input, RegRangeWriteCb{addr: start, len: count, cb: cb})
+}
+
+// on_read_coil_range registers a read callback for a range of coils.
+pub func on_read_coil_range(s Server, start int, count int, cb func(int, []bool) []bool) {
+    s.on_read_coil = std.core.append(s.on_read_coil, CoilRangeReadCb{addr: start, len: count, cb: cb})
+}
+
+// on_write_coil_range registers a write callback for a range of coils.
+pub func on_write_coil_range(s Server, start int, count int, cb func(int, []bool)) {
+    s.on_write_coil = std.core.append(s.on_write_coil, CoilRangeWriteCb{addr: start, len: count, cb: cb})
+}
+
+// on_read_discrete_range registers a read callback for a range of discrete inputs.
+pub func on_read_discrete_range(s Server, start int, count int, cb func(int, []bool) []bool) {
+    s.on_read_discrete = std.core.append(s.on_read_discrete, CoilRangeReadCb{addr: start, len: count, cb: cb})
+}
+
+// on_write_discrete_range registers a write callback for a range of discrete inputs.
+pub func on_write_discrete_range(s Server, start int, count int, cb func(int, []bool)) {
+    s.on_write_discrete = std.core.append(s.on_write_discrete, CoilRangeWriteCb{addr: start, len: count, cb: cb})
+}
+
+// ── range access validation ──────────────────────────────────────────────────
+
+// _check_ranges returns true if the requested range [address, address+count)
+// either fully includes or does not overlap any registered range.
+// Partial overlap (address falls inside a range but doesn't cover it) is rejected.
+// Accepts any slice of RangeEntry — works for both register and coil callback types.
+func _check_ranges(ranges []RangeEntry, address int, count int) bool {
+    req_end := address + count
+    i := 0
+    for i < std.core.len(ranges) {
+        e := ranges[i]
+        e_end := e.start() + e.count()
+        if address < e_end and req_end > e.start() {
+            if address > e.start() or req_end < e_end {
+                return false
+            }
+        }
+        i = i + 1
+    }
+    return true
+}
+
+func _to_range_entries_reg_read(ranges []RegRangeReadCb) []RangeEntry {
+    out := []
+    i := 0
+    for i < std.core.len(ranges) {
+        out = std.core.append(out, ranges[i])
+        i = i + 1
+    }
+    return out
+}
+
+func _to_range_entries_reg_write(ranges []RegRangeWriteCb) []RangeEntry {
+    out := []
+    i := 0
+    for i < std.core.len(ranges) {
+        out = std.core.append(out, ranges[i])
+        i = i + 1
+    }
+    return out
+}
+
+func _to_range_entries_coil_read(ranges []CoilRangeReadCb) []RangeEntry {
+    out := []
+    i := 0
+    for i < std.core.len(ranges) {
+        out = std.core.append(out, ranges[i])
+        i = i + 1
+    }
+    return out
+}
+
+func _to_range_entries_coil_write(ranges []CoilRangeWriteCb) []RangeEntry {
+    out := []
+    i := 0
+    for i < std.core.len(ranges) {
+        out = std.core.append(out, ranges[i])
+        i = i + 1
+    }
+    return out
+}
+
+// ── data access ───────────────────────────────────────────────────────────────
+
+// set_holding sets a holding register value.
+pub func set_holding(s Server, address int, value int) {
+    s.holding_regs = _set_int(s.holding_regs, address, value)
+}
+
+// set_input sets an input register value.
+pub func set_input(s Server, address int, value int) {
+    s.input_regs = _set_int(s.input_regs, address, value)
+}
+
+// set_coil sets a coil value.
+pub func set_coil(s Server, address int, value bool) {
+    s.coils = _set_bool(s.coils, address, value)
+}
+
+// set_discrete sets a discrete input value.
+pub func set_discrete(s Server, address int, value bool) {
+    s.discrete_inputs = _set_bool(s.discrete_inputs, address, value)
+}
+
+func _set_int(arr []int, idx int, val int) []int {
+    out := []
+    i := 0
+    for i < std.core.len(arr) {
+        if i == idx {
+            out = std.core.append(out, val)
+        } else {
+            out = std.core.append(out, arr[i])
+        }
+        i = i + 1
+    }
+    return out
+}
+
+func _set_bool(arr []bool, idx int, val bool) []bool {
+    out := []
+    i := 0
+    for i < std.core.len(arr) {
+        if i == idx {
+            out = std.core.append(out, val)
+        } else {
+            out = std.core.append(out, arr[i])
+        }
+        i = i + 1
+    }
+    return out
+}
+
+// ── I/O helpers ───────────────────────────────────────────────────────────────
+
+func read_exact(conn Connection, n int) string {
+    sb  := std.string.builder()
+    got := 0
+    for got < n {
+        chunk := conn.read(n - got)
+        if std.core.is_error(chunk) { return sb.str() }
+        sz := std.core.bytelen(chunk)
+        if sz == 0 { return sb.str() }
+        sb.write(chunk)
+        got = got + sz
+    }
+    return sb.str()
+}
+
+func recv(conn Connection) fr.Response {
+    header := read_exact(conn, 6)
+    if std.core.bytelen(header) < 6 {
+        return fr.Response {
+            tx_id: 0, unit_id: 0, func_code: 0,
+            data: [], is_exception: true, exception_code: -1,
+        }
+    }
+    payload_len := b.u16be_at(header, 4)
+    body := read_exact(conn, payload_len)
+    if std.core.bytelen(body) < payload_len {
+        return fr.Response {
+            tx_id: 0, unit_id: 0, func_code: 0,
+            data: [], is_exception: true, exception_code: -1,
+        }
+    }
+    return fr.parse(header + body)
+}
+
+func exception_frame(tx_id int, unit_id int, func_code int, exc_code int) string {
+    return fr.build(tx_id, unit_id, func_code | k.FC_EXCEPTION_FLAG, [exc_code])
+}
+
+// build_response constructs a Modbus TCP response frame.
+// pdu_bytes are the raw bytes after the function code.
+func build_response(tx_id int, unit_id int, func_code int, pdu_bytes string) string {
+    pdu_len := 1 + 1 + std.core.bytelen(pdu_bytes)
+    sb := std.string.builder()
+    sb.write(b.u16be(tx_id))
+    sb.write(b.u16be(0))
+    sb.write(b.u16be(pdu_len))
+    sb.write(b.u8(unit_id))
+    sb.write(b.u8(func_code))
+    sb.write(pdu_bytes)
+    return sb.str()
+}
+
+// ── request dispatch ──────────────────────────────────────────────────────────
+
+func (s Server) handle_request(req fr.Response) string {
+    if req.is_exception { return "" }
+    if req.unit_id != s.unit_id { return "" }
+
+    fc := req.func_code
+
+    if fc == k.FC_READ_HOLDING_REGS    { return s.handle_read_holding(req) }
+    if fc == k.FC_READ_INPUT_REGS      { return s.handle_read_input(req) }
+    if fc == k.FC_READ_COILS           { return s.handle_read_coils(req) }
+    if fc == k.FC_READ_DISCRETE_INPUTS { return s.handle_read_discrete(req) }
+    if fc == k.FC_WRITE_SINGLE_REG     { return s.handle_write_single_reg(req) }
+    if fc == k.FC_WRITE_SINGLE_COIL    { return s.handle_write_single_coil(req) }
+    if fc == k.FC_WRITE_MULTIPLE_REGS  { return s.handle_write_multiple_regs(req) }
+    if fc == k.FC_WRITE_MULTIPLE_COILS { return s.handle_write_multiple_coils(req) }
+
+    return exception_frame(req.tx_id, req.unit_id, fc, k.EX_ILLEGAL_FUNCTION)
+}
+
+// ── read handlers ─────────────────────────────────────────────────────────────
+
+func (s Server) handle_read_holding(req fr.Response) string {
+    return _handle_read_regs(s, req, s.holding_regs, s.on_read_holding)
+}
+
+func (s Server) handle_read_input(req fr.Response) string {
+    return _handle_read_regs(s, req, s.input_regs, s.on_read_input)
+}
+
+func _handle_read_regs(s Server, req fr.Response, regs []int, ranges []RegRangeReadCb) string {
+    address := (req.data[0] & 255) * 256 + (req.data[1] & 255)
+    count   := (req.data[2] & 255) * 256 + (req.data[3] & 255)
+
+    if address + count > std.core.len(regs) {
+        return exception_frame(req.tx_id, req.unit_id, req.func_code, k.EX_ILLEGAL_ADDRESS)
+    }
+
+    if not _check_ranges(_to_range_entries_reg_read(ranges), address, count) {
+        return exception_frame(req.tx_id, req.unit_id, req.func_code, k.EX_ILLEGAL_ADDRESS)
+    }
+
+    ps := std.string.builder()
+    ps.write(b.u8(count * 2))
+    i := 0
+    for i < count {
+        addr := address + i
+        // check if this address is the start of a registered range
+        j := 0
+        found := false
+        for j < std.core.len(ranges) {
+            r := ranges[j]
+            if r.addr == addr {
+                // gather current values for the range
+                range_vals := []
+                k := 0
+                for k < r.len {
+                    range_vals = std.core.append(range_vals, regs[addr + k])
+                    k = k + 1
+                }
+                effective := r.cb(addr, range_vals)
+                // write all values from the effective range
+                k = 0
+                for k < std.core.len(effective) {
+                    ps.write(b.u8((effective[k] >> 8) & 255))
+                    ps.write(b.u8(effective[k] & 255))
+                    k = k + 1
+                }
+                i = i + r.len - 1
+                found = true
+                break
+            }
+            j = j + 1
+        }
+        if not found {
+            val := regs[addr]
+            ps.write(b.u8((val >> 8) & 255))
+            ps.write(b.u8(val & 255))
+        }
+        i = i + 1
+    }
+
+    return build_response(req.tx_id, req.unit_id, req.func_code, ps.str())
+}
+
+func (s Server) handle_read_coils(req fr.Response) string {
+    return _handle_read_bits(s, req, s.coils, s.on_read_coil)
+}
+
+func (s Server) handle_read_discrete(req fr.Response) string {
+    return _handle_read_bits(s, req, s.discrete_inputs, s.on_read_discrete)
+}
+
+func _handle_read_bits(s Server, req fr.Response, bits []bool, ranges []CoilRangeReadCb) string {
+    address := (req.data[0] & 255) * 256 + (req.data[1] & 255)
+    count   := (req.data[2] & 255) * 256 + (req.data[3] & 255)
+
+    if address + count > std.core.len(bits) {
+        return exception_frame(req.tx_id, req.unit_id, req.func_code, k.EX_ILLEGAL_ADDRESS)
+    }
+
+    if not _check_ranges(_to_range_entries_coil_read(ranges), address, count) {
+        return exception_frame(req.tx_id, req.unit_id, req.func_code, k.EX_ILLEGAL_ADDRESS)
+    }
+
+    // build an effective boolean array for the requested range
+    eff := []
+    i := 0
+    for i < count {
+        addr := address + i
+        j := 0
+        found := false
+        for j < std.core.len(ranges) {
+            r := ranges[j]
+            if r.addr == addr {
+                range_vals := []
+                k := 0
+                for k < r.len {
+                    range_vals = std.core.append(range_vals, bits[addr + k])
+                    k = k + 1
+                }
+                effective := r.cb(addr, range_vals)
+                k = 0
+                for k < std.core.len(effective) {
+                    eff = std.core.append(eff, effective[k])
+                    k = k + 1
+                }
+                i = i + r.len - 1
+                found = true
+                break
+            }
+            j = j + 1
+        }
+        if not found {
+            eff = std.core.append(eff, bits[addr])
+        }
+        i = i + 1
+    }
+
+    // pack booleans into bytes
+    byte_count := (count + 7) / 8
+    ps := std.string.builder()
+    ps.write(b.u8(byte_count))
+    i = 0
+    for i < byte_count {
+        bval := 0
+        bit  := 0
+        for bit < 8 {
+            idx := i * 8 + bit
+            if idx < count and eff[idx] {
+                bval = bval | (1 << bit)
+            }
+            bit = bit + 1
+        }
+        ps.write(b.u8(bval))
+        i = i + 1
+    }
+
+    return build_response(req.tx_id, req.unit_id, req.func_code, ps.str())
+}
+
+// ── write handlers ────────────────────────────────────────────────────────────
+
+func (s Server) handle_write_single_reg(req fr.Response) string {
+    address := (req.data[0] & 255) * 256 + (req.data[1] & 255)
+    value   := (req.data[2] & 255) * 256 + (req.data[3] & 255)
+
+    if address >= std.core.len(s.holding_regs) {
+        return exception_frame(req.tx_id, req.unit_id, req.func_code, k.EX_ILLEGAL_ADDRESS)
+    }
+
+    if not _check_ranges(_to_range_entries_reg_write(s.on_write_holding), address, 1) {
+        return exception_frame(req.tx_id, req.unit_id, req.func_code, k.EX_ILLEGAL_ADDRESS)
+    }
+
+    s.holding_regs = _set_int(s.holding_regs, address, value)
+
+    // invoke range callback if this address is a range start
+    j := 0
+    for j < std.core.len(s.on_write_holding) {
+        r := s.on_write_holding[j]
+        if r.addr == address and r.len == 1 {
+            r.cb(address, [value])
+            break
+        }
+        j = j + 1
+    }
+
+    ps := std.string.builder()
+    ps.write(b.u8(req.data[0]))
+    ps.write(b.u8(req.data[1]))
+    ps.write(b.u8(req.data[2]))
+    ps.write(b.u8(req.data[3]))
+    return build_response(req.tx_id, req.unit_id, req.func_code, ps.str())
+}
+
+func (s Server) handle_write_single_coil(req fr.Response) string {
+    address := (req.data[0] & 255) * 256 + (req.data[1] & 255)
+    on      := (req.data[2] & 255) == 0xFF
+
+    if address >= std.core.len(s.coils) {
+        return exception_frame(req.tx_id, req.unit_id, req.func_code, k.EX_ILLEGAL_ADDRESS)
+    }
+
+    if not _check_ranges(_to_range_entries_coil_write(s.on_write_coil), address, 1) {
+        return exception_frame(req.tx_id, req.unit_id, req.func_code, k.EX_ILLEGAL_ADDRESS)
+    }
+
+    s.coils = _set_bool(s.coils, address, on)
+
+    j := 0
+    for j < std.core.len(s.on_write_coil) {
+        r := s.on_write_coil[j]
+        if r.addr == address and r.len == 1 {
+            r.cb(address, [on])
+            break
+        }
+        j = j + 1
+    }
+
+    ps := std.string.builder()
+    ps.write(b.u8(req.data[0]))
+    ps.write(b.u8(req.data[1]))
+    ps.write(b.u8(req.data[2]))
+    ps.write(b.u8(req.data[3]))
+    return build_response(req.tx_id, req.unit_id, req.func_code, ps.str())
+}
+
+func (s Server) handle_write_multiple_regs(req fr.Response) string {
+    address := (req.data[0] & 255) * 256 + (req.data[1] & 255)
+    count   := (req.data[2] & 255) * 256 + (req.data[3] & 255)
+
+    if address + count > std.core.len(s.holding_regs) {
+        return exception_frame(req.tx_id, req.unit_id, req.func_code, k.EX_ILLEGAL_ADDRESS)
+    }
+
+    if not _check_ranges(_to_range_entries_reg_write(s.on_write_holding), address, count) {
+        return exception_frame(req.tx_id, req.unit_id, req.func_code, k.EX_ILLEGAL_ADDRESS)
+    }
+
+    // update static store
+    i := 0
+    offset := 5
+    for i < count {
+        value := (req.data[offset] & 255) * 256 + (req.data[offset + 1] & 255)
+        s.holding_regs = _set_int(s.holding_regs, address + i, value)
+        offset = offset + 2
+        i = i + 1
+    }
+
+    // invoke range callbacks for each registered range fully within the write
+    j := 0
+    for j < std.core.len(s.on_write_holding) {
+        r := s.on_write_holding[j]
+        r_end := r.addr + r.len
+        if r.addr >= address and r_end <= address + count {
+            range_vals := []
+            k := 0
+            for k < r.len {
+                range_vals = std.core.append(range_vals, s.holding_regs[r.addr + k])
+                k = k + 1
+            }
+            r.cb(r.addr, range_vals)
+        }
+        j = j + 1
+    }
+
+    ps := std.string.builder()
+    ps.write(b.u8(req.data[0]))
+    ps.write(b.u8(req.data[1]))
+    ps.write(b.u8(req.data[2]))
+    ps.write(b.u8(req.data[3]))
+    return build_response(req.tx_id, req.unit_id, req.func_code, ps.str())
+}
+
+func (s Server) handle_write_multiple_coils(req fr.Response) string {
+    address := (req.data[0] & 255) * 256 + (req.data[1] & 255)
+    count   := (req.data[2] & 255) * 256 + (req.data[3] & 255)
+
+    if address + count > std.core.len(s.coils) {
+        return exception_frame(req.tx_id, req.unit_id, req.func_code, k.EX_ILLEGAL_ADDRESS)
+    }
+
+    if not _check_ranges(_to_range_entries_coil_write(s.on_write_coil), address, count) {
+        return exception_frame(req.tx_id, req.unit_id, req.func_code, k.EX_ILLEGAL_ADDRESS)
+    }
+
+    offset := 5
+    i := 0
+    for i < count {
+        byte_idx := i / 8
+        bit_idx  := i rem 8
+        byte_val := req.data[offset + byte_idx]
+        on       := (byte_val & (1 << bit_idx)) != 0
+        s.coils = _set_bool(s.coils, address + i, on)
+        i = i + 1
+    }
+
+    // invoke range callbacks for each registered range fully within the write
+    j := 0
+    for j < std.core.len(s.on_write_coil) {
+        r := s.on_write_coil[j]
+        r_end := r.addr + r.len
+        if r.addr >= address and r_end <= address + count {
+            range_vals := []
+            k := 0
+            for k < r.len {
+                range_vals = std.core.append(range_vals, s.coils[r.addr + k])
+                k = k + 1
+            }
+            r.cb(r.addr, range_vals)
+        }
+        j = j + 1
+    }
+
+    ps := std.string.builder()
+    ps.write(b.u8(req.data[0]))
+    ps.write(b.u8(req.data[1]))
+    ps.write(b.u8(req.data[2]))
+    ps.write(b.u8(req.data[3]))
+    return build_response(req.tx_id, req.unit_id, req.func_code, ps.str())
+}
+
+// ── listen ────────────────────────────────────────────────────────────────────
+
+// listen starts a Modbus TCP server on addr and handles connections sequentially.
+// Blocks indefinitely.  Requires --cap net=listen and --net-listen-allow for the address.
+pub func listen(addr string, s Server) {
+    l, err := net.listen("tcp", addr)
+    if err != null {
+        std.io.eprintln("listen " + addr + ": " + string(err))
+        return
+    }
+    defer l.close()
+
+    std.io.println("modbus server listening on " + addr + " (unit " + std.conv.to_string(s.unit_id) + ")")
+
+    for {
+        pair := l.accept()
+        conn := pair[0]
+        aerr := pair[1]
+        if aerr != null { continue }
+        conn.set_deadline(10000)
+
+        std.io.println("client connected")
+
+        for {
+            req := recv(conn)
+            if std.core.is_error(req) {
+                std.io.println("client disconnected")
+                break
+            }
+
+            resp := s.handle_request(req)
+
+            if std.core.bytelen(resp) == 0 { continue }
+
+            n := conn.write(resp)
+            if std.core.is_error(n) {
+                std.io.println("write error")
+                break
+            }
+        }
+
+        conn.close()
+    }
+}
