@@ -18,8 +18,10 @@ operators, structural interfaces, and the `cap:net` TCP capability.
 gengo --cap net --modules ./modbus demo.gengo
 ```
 
-The demo connects to `127.0.0.1:5020`, reads holding registers, writes a
-register and a coil, reads coils, and writes/reads back multiple registers.
+The demo connects to `127.0.0.1:5020` (the temperature controller server),
+reads temperature/humidity sensors, reads and writes a setpoint with clamping,
+toggles heater/fan coils, reads a dynamic alarm coil, tests partial-range
+error rejection, and reads/writes float registers via the codec.
 
 ### Server
 
@@ -101,18 +103,18 @@ Any value with `read(int) string`, `write(string) int`, `close()`, and
 ### Functions
 
 ```gengo
-mb.read_holding_registers(conn Connection, c Client, address int, count int) []int
-mb.read_input_registers(conn Connection, c Client, address int, count int)   []int
-mb.read_coils(conn Connection, c Client, address int, count int)             []bool
-mb.read_discrete_inputs(conn Connection, c Client, address int, count int)   []bool
-mb.write_single_register(conn Connection, c Client, address int, value int)  bool
-mb.write_single_coil(conn Connection, c Client, address int, on bool)        bool
-mb.write_multiple_registers(conn Connection, c Client, address int, values []int) bool
-mb.write_multiple_coils(conn Connection, c Client, address int, values []bool)   bool
+mb.read_holding_registers(conn Connection, c Client, address int, count int) ([]int, ?error)
+mb.read_input_registers(conn Connection, c Client, address int, count int)   ([]int, ?error)
+mb.read_coils(conn Connection, c Client, address int, count int)             ([]bool, ?error)
+mb.read_discrete_inputs(conn Connection, c Client, address int, count int)   ([]bool, ?error)
+mb.write_single_register(conn Connection, c Client, address int, value int)  ?error
+mb.write_single_coil(conn Connection, c Client, address int, on bool)        ?error
+mb.write_multiple_registers(conn Connection, c Client, address int, values []int) ?error
+mb.write_multiple_coils(conn Connection, c Client, address int, values []bool)   ?error
 ```
 
-All functions return an error value (checkable with `std.core.is_error`) on
-exception response or connection failure.
+Read functions return a `(result, ?error)` tuple — check `err != null` before
+using the result.  Write functions return `?error` directly (`null` on success).
 
 ### Server
 
@@ -270,12 +272,13 @@ cdc := import("./modbus/codec")
 decoder := cdc.Codec { byte_order: cdc.CDAB }  // most common Modbus convention
 
 // Decode a 32-bit float from two consecutive registers.
-regs  := mb.read_holding_registers(conn, client, 100, 2)
+regs, err := mb.read_holding_registers(conn, client, 100, 2)
+if err != null { handle_error(err) }
 value := decoder.f32(regs, 0)
 
 // Encode a float back to register values for writing.
-out   := decoder.f32_regs(value)
-mb.write_multiple_registers(conn, client, 100, out)
+out := decoder.f32_regs(value)
+err  = mb.write_multiple_registers(conn, client, 100, out)
 ```
 
 **Byte orders** (ABCD naming convention, A = most significant byte):
@@ -312,12 +315,13 @@ passed to each operation so that deadline management, reconnect logic, and
 multiplexing stay in the caller:
 
 ```gengo
-conn   := net.dial("tcp", "127.0.0.1:502")
+conn := net.dial("tcp", "127.0.0.1:502")
 defer conn.close()
 conn.set_deadline(5000)
 
 client := mb.Client { unit_id: 1, tx_id: 0 }
-regs   := mb.read_holding_registers(conn, client, 100, 10)
+regs, err := mb.read_holding_registers(conn, client, 100, 10)
+if err != null { handle_error(err) }
 ```
 
 ### Binary framing with `std.bytes`
@@ -340,8 +344,8 @@ Gengo's module-qualified type feature (v0.5.0-pre5+):
 ```gengo
 fr := import("./frame")
 
-func recv(conn Connection) fr.Response { ... }
-pub func read_holding_registers(conn Connection, c Client, ...) []int { ... }
+func send_request(conn Connection, c Client, ...) (fr.Response, ?error) { ... }
+pub func read_holding_registers(conn Connection, c Client, ...) ([]int, ?error) { ... }
 ```
 
 ### Listen policy
